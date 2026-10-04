@@ -760,3 +760,35 @@ func TestServeRWResize(t *testing.T) {
 	}
 	t.Log("ServeRW resize callback fired correctly")
 }
+
+// TestServeRWClose checks that Close ends a ServeRW session instead of
+// dereferencing the pty command that ServeRW never starts.
+func TestServeRWClose(t *testing.T) {
+	srv, err := NewServer("", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outR, outW := io.Pipe()
+	defer outW.Close()
+	rw := struct {
+		io.Reader
+		io.Writer
+		io.Closer
+	}{outR, io.Discard, outR}
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.ServeRW(rw, nil) }()
+	<-srv.started
+
+	srv.Close()
+
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("ServeRW: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ServeRW did not return after Close")
+	}
+}

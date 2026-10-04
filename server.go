@@ -59,8 +59,9 @@ type Server struct {
 	mu         sync.Mutex
 	clientAddr *net.UDPAddr
 
-	started chan struct{} // closed when PTY is running
-	done    chan struct{}
+	started  chan struct{} // closed when PTY is running
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 // GenerateKey creates a random 128-bit mosh key and returns it as base64.
@@ -181,11 +182,16 @@ func (s *Server) Serve() error {
 	}()
 
 	err = s.cmd.Wait()
-	close(s.done)
+	s.stop()
 	s.ptmx.Close()
 	s.conn.Close()
 	wg.Wait()
 	return err
+}
+
+// stop closes done once; Close and the serve loops may all try.
+func (s *Server) stop() {
+	s.doneOnce.Do(func() { close(s.done) })
 }
 
 // Done returns a channel that is closed when the server shuts down.
@@ -247,11 +253,7 @@ func (s *Server) readIO(r io.Reader, out chan<- []byte) {
 			}
 		}
 		if err != nil {
-			select {
-			case <-s.done:
-			default:
-				close(s.done)
-			}
+			s.stop()
 			return
 		}
 	}
@@ -272,7 +274,7 @@ func (s *Server) mainLoopRW(rw io.Writer, resize func(cols, rows uint16), ioOutp
 		case <-s.done:
 			return
 		case <-deadline:
-			close(s.done)
+			s.stop()
 			return
 		case <-time.After(100 * time.Millisecond):
 		}
@@ -350,6 +352,11 @@ func (s *Server) Close() {
 		return
 	}
 
+	if s.cmd == nil {
+		// ServeRW: no process to kill. End the session; ServeRW closes rw.
+		s.stop()
+		return
+	}
 	if s.cmd.Process != nil {
 		s.cmd.Process.Kill()
 	}
@@ -377,7 +384,7 @@ func (s *Server) mainLoop(ptyOutput <-chan []byte, userInput <-chan UserInstruct
 		case <-s.done:
 			return
 		case <-deadline:
-			close(s.done)
+			s.stop()
 			return
 		case <-time.After(100 * time.Millisecond):
 		}
